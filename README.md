@@ -1,25 +1,24 @@
 # nanochat-ja
 
-A from-scratch **Japanese-native** LLM (tokenizer → pretraining → SFT → chat), built on top of
-[karpathy/nanochat](https://github.com/karpathy/nanochat), trained end-to-end on a **single
-RTX 3090 (24GB)**.
+[karpathy/nanochat](https://github.com/karpathy/nanochat) をベースに、**トークナイザ学習 → 事前学習
+→ SFT → チャット**まで、単一の **RTX 3090 (24GB)** だけでフルスクラッチで作った**日本語ネイティブ**LLM。
 
-> This is a fork of [karpathy/nanochat](https://github.com/karpathy/nanochat) (MIT License, see
-> [`LICENSE`](LICENSE)). The core training/inference framework (tokenizer, GPT model, optimizer,
-> data loader, engine, SFT loop) is upstream's; this fork adds a Japanese data pipeline, a
-> from-scratch Japanese tokenizer, a Japanese SFT dataset, evaluation on a Japanese benchmark, and
-> a couple of chat front-ends, all described below.
+> このリポジトリは [karpathy/nanochat](https://github.com/karpathy/nanochat)(MITライセンス、
+> [`LICENSE`](LICENSE) 参照)のForkです。学習・推論の中核フレームワーク(トークナイザ、GPTモデル、
+> オプティマイザ、データローダ、推論エンジン、SFTループ)は本家のものをそのまま使用しています。
+> このForkで追加したのは、日本語データパイプライン、フルスクラッチの日本語トークナイザ、日本語SFT
+> データセット、日本語ベンチマークでの評価、簡易チャットフロントエンドです。詳細は以下に記載します。
 
-## Results
+## 結果
 
-| Stage | Metric | Result |
+| ステージ | 指標 | 結果 |
 |---|---|---|
-| Tokenizer (65,536 vocab, trained on 1B chars of CC-100 ja) | Compression on Japanese text | 7.64 bytes/token, vs. 2.06 (GPT-2) / 2.85 (GPT-4) — **63–73% more efficient** |
-| Base pretraining (depth=12, ~488M params) | Validation bits-per-byte | 0.818 → **0.801** after extending training (12 → 26 tokens/param) |
-| Base model | [JCommonsenseQA](https://github.com/yahoo-japan/JGLUE) (2-shot) | **24.1%** (270/1119) vs. 20.0% random baseline |
-| SFT (`llm-jp/magpie-sft-v1.0`, native Japanese) | Validation bits-per-byte | 1.205 → **0.451** |
+| トークナイザ(vocab 65,536、CC-100 jaの10億文字で学習) | 日本語テキストへの圧縮率 | 7.64 bytes/token(GPT-2: 2.06、GPT-4: 2.85 と比べて**63〜73%効率的**) |
+| 事前学習(depth=12、約4.88億パラメータ) | Validation bits-per-byte | 0.818 →(学習量を token:param 比 12→26 に拡張)**0.801** |
+| ベースモデル | [JCommonsenseQA](https://github.com/yahoo-japan/JGLUE)(2-shot) | ランダムベースライン20.0%に対して**24.1%**(270/1119) |
+| SFT(`llm-jp/magpie-sft-v1.0`、ネイティブ日本語) | Validation bits-per-byte | 1.205 → **0.451** |
 
-Sample conversation after SFT:
+SFT後の会話例:
 
 ```
 User: 日本の首都はどこですか?
@@ -32,185 +31,185 @@ Assistant: もちろんです、以下にいくつかのおすすめの日本食
 2. うどん: うどんは小麦粉と水で作った小麦粉の麺で、その独特の食感と軽快な味わいが特徴です。...
 ```
 
-(A ~488M parameter model trained for ~17 GPU-hours on one consumer GPU will still hallucinate
-dates and struggle with arithmetic — see [Design notes](#design-notes--what-i-learned) for an
-honest account of what worked and what didn't.)
+(コンシューマ向けGPU1枚・約17 GPU時間で学習した約4.88億パラメータのモデルなので、日付のハルシネー
+ションや算数の失敗は依然として発生します。うまくいった点・いかなかった点は
+[Design notes](#design-notes--学んだこと) に正直にまとめています。)
 
 ## Quickstart
 
-No API keys or credentials are required anywhere in this pipeline — every dataset download below
-is a public, anonymous request to Hugging Face.
+このパイプラインのどこにもAPIキーや認証情報は必要ありません — 以下のダウンロードはすべて
+Hugging Faceへの匿名の公開リクエストです。
 
 ```bash
-uv sync --extra gpu   # or --extra cpu for CPU/MPS (will be very slow)
+uv sync --extra gpu   # CPU/MPSの場合は --extra cpu (かなり遅くなります)
 source .venv/bin/activate
-export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"  # where data/checkpoints are cached
+export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"  # データ・チェックポイントのキャッシュ先
 ```
 
-### 1. Pretraining data (Japanese CC-100)
+### 1. 事前学習データ(日本語CC-100)
 
 ```bash
-python -m dev.prepare_cc100_ja --num-source-files 8   # ~16GB download, ~9.6B characters
+python -m dev.prepare_cc100_ja --num-source-files 8   # 約16GBのダウンロード、約96億文字
 ```
 
-Downloads shards from [`range3/cc100-ja`](https://huggingface.co/datasets/range3/cc100-ja) and
-repackages them into the parquet shard format `nanochat/dataset.py` expects.
+[`range3/cc100-ja`](https://huggingface.co/datasets/range3/cc100-ja) からshardをダウンロードし、
+`nanochat/dataset.py` が期待するparquet shard形式に再構成します。
 
-### 2. Tokenizer
+### 2. トークナイザ
 
 ```bash
 python -m scripts.tok_train --vocab-size 65536 --max-chars 1000000000
 python -m scripts.tok_eval
 ```
 
-Trained from scratch on the Japanese corpus only. 1B characters was chosen after a 3B-character
-run OOM'd during BPE pair-counting (see [Design notes](#design-notes--what-i-learned)).
+日本語コーパスのみを使ってフルスクラッチで学習します。30億文字で実行した際にBPEのペアカウント処理中
+にOOMしたため、10億文字に落として学習しました(詳細は [Design notes](#design-notes--学んだこと))。
 
-### 3. Base pretraining
+### 3. 事前学習(ベースモデル)
 
 ```bash
 python -m scripts.base_train --depth=12 --device-batch-size=16
 ```
 
-`--depth=12` picks a ~488M parameter model sized for a 24GB card; nanochat derives every other
-hyperparameter (width, batch size, LR, weight decay, training horizon) from it. `--device-batch-size`
-may need to go lower on smaller GPUs — see upstream's README for the OOM-tuning guidance this fork
-inherited. To extend training with more of the downloaded corpus later:
+`--depth=12` は24GBのGPUに収まるよう選んだ約4.88億パラメータのモデルサイズです。nanochatはこの値
+から他のハイパーパラメータ(幅、バッチサイズ、学習率、weight decay、学習量)をすべて自動で導出しま
+す。`--device-batch-size` はより小さいGPUではさらに下げる必要があるかもしれません(本家READMEの
+OOM対処法がそのまま使えます)。ダウンロード済みコーパスをさらに使って学習を延長する場合:
 
 ```bash
 python -m scripts.base_train --depth=12 --device-batch-size=16 \
-  --resume-from-step=<last step> --target-param-data-ratio=26
+  --resume-from-step=<最後のstep> --target-param-data-ratio=26
 ```
 
-### 4. Supervised fine-tuning (chat)
+### 4. SFT(対話ファインチューニング)
 
 ```bash
 python -m scripts.chat_sft --total-batch-size=32768 --magpie-epochs=1
 ```
 
-Uses [`llm-jp/magpie-sft-v1.0`](https://huggingface.co/datasets/llm-jp/magpie-sft-v1.0), a native
-(not translated) Japanese instruction dataset. `--total-batch-size` is set explicitly because the
-pretraining default (524,288 tokens) is sized for billions of pretraining tokens, not a ~130K-row
-SFT set — see [Design notes](#design-notes--what-i-learned).
+[`llm-jp/magpie-sft-v1.0`](https://huggingface.co/datasets/llm-jp/magpie-sft-v1.0)(翻訳ではなく
+ネイティブ日本語)を使用します。事前学習のデフォルトバッチサイズ(524,288トークン)は数十億トークン
+規模の事前学習向けのサイズで、約13万行のSFTデータセットには大きすぎるため、`--total-batch-size` を
+明示的に指定しています(詳細は [Design notes](#design-notes--学んだこと))。
 
-### 5. Talk to it
-
-```bash
-python -m scripts.chat_cli                 # interactive CLI (upstream)
-python -m dev.chat_relay "こんにちは"        # single-shot, persists conversation state to disk
-python -m dev.webapp                        # local web UI at http://127.0.0.1:8000
-```
-
-### Evaluation
+### 5. 会話してみる
 
 ```bash
-python -m dev.eval_jcommonsenseqa           # JCommonsenseQA (Japanese commonsense QA), auto-downloads
-python -m scripts.base_eval                 # upstream's CORE metric (English benchmarks; not very
-                                             # informative for a Japanese-only model, included for completeness)
+python -m scripts.chat_cli                 # 対話型CLI(本家のスクリプト)
+python -m dev.chat_relay "こんにちは"        # 単発実行、会話状態はディスクに保存して継続
+python -m dev.webapp                        # ローカルWeb UI(http://127.0.0.1:8000)
 ```
 
-## Design notes / what I learned
+### 評価
 
-**Why depth=12, not d20/d26 (upstream's GPT-2-grade target)?** Upstream's speedrun targets an
-8×H100 node. On one RTX 3090, a compute budget calculation (peak BF16 FLOPs of the 3090 × available
-time, divided by FLOPs/token at various depths) put the compute-optimal size around depth 9–12 for
-a several-hour run — depth=12 was chosen because it's also nanochat's own internal reference depth
-(the muP-style scaling formulas are calibrated against d12), keeping the run inside a well-tested
-hyperparameter regime.
+```bash
+python -m dev.eval_jcommonsenseqa           # JCommonsenseQA(日本語常識推論)、データは自動ダウンロード
+python -m scripts.base_eval                 # 本家のCOREメトリクス(英語ベンチマークのため日本語限定
+                                             # モデルの評価としては参考程度。一応動作確認用に記載)
+```
 
-**Why train the tokenizer from scratch instead of reusing GPT-2/GPT-4's?** Those are optimized for
-English; a from-scratch BPE tokenizer on the Japanese corpus alone compresses Japanese text far
-better (see the Results table). Vocab size 65,536 (vs. upstream's default 32,768) was chosen
-because Japanese's much larger character inventory benefits from a bigger vocabulary, and it's
-still a clean power of two for nanochat's vocab-padding logic. The tradeoff: `value_embeds` and
-`lm_head` scale with vocab size, so this roughly doubled their parameter count relative to the
-default — worth it for the compression gain, but the resulting VRAM headroom is tighter as a
-result (`--device-batch-size` had to drop from 32 to 16 on a 24GB card).
+## Design notes / 学んだこと
 
-**Why CC-100 ja for pretraining?** There is no dataset actually named "Japanese SlimPajama" — that
-name doesn't correspond to a real, independent Japanese corpus (SlimPajama itself is English-only,
-occasionally used as one *ingredient* alongside separate Japanese corpora in other projects' data
-mixes). [`range3/cc100-ja`](https://huggingface.co/datasets/range3/cc100-ja) — a parquet re-shard
-of the Japanese portion of [CC-100](https://data.statmt.org/cc-100/) — was chosen instead: it's
-large, in a format nanochat's loader accepts almost unmodified, and has real precedent in Japanese
-LLM projects.
+**なぜdepth=12なのか(本家のGPT-2級ターゲットであるd20/d26ではなく)?** 本家のspeedrunは
+8×H100ノードを前提としています。RTX3090 1枚では、計算量予算(3090のピークBF16 FLOPs × 使える
+時間 ÷ 各depthでのFLOPs/token)から、数時間規模の学習にはdepth 9〜12あたりがcompute-optimalという
+試算になりました。depth=12を選んだのは、これがnanochat内部の基準depth(muP的なスケーリング式が
+d12を基準にキャリブレーションされている)でもあり、十分に検証されたハイパーパラメータ帯に収まる
+ためです。
 
-**Extending pretraining safely.** `scripts/base_train.py --resume-from-step` is designed for
-resuming an *interrupted* run of the same schedule — its checkpoint carries the optimizer's
-learning-rate state, which is correct to restore in that case. Resuming with a *larger*
-`--target-param-data-ratio` to train further is a different situation: the checkpointed LR reflects
-the old (already-decayed) schedule, not a fresh warm restart for the new one. Left as-is, extending
-training this way would silently train at a near-zero learning rate for the entire extension. This
-fork fixes it by snapshotting the freshly-computed LR before `optimizer.load_state_dict()` and
-restoring it after (momentum buffers still load normally) — see the diff in `scripts/base_train.py`.
+**なぜGPT-2/GPT-4のトークナイザを流用せず、ゼロから学習したのか?** それらは英語向けに最適化されて
+おり、日本語コーパスのみでフルスクラッチ学習したBPEトークナイザの方が日本語テキストをはるかに効率
+よく圧縮できます(上の結果表を参照)。vocabサイズを65,536(本家デフォルトの32,768ではなく)にした
+のは、日本語の文字種の多さがより大きな語彙から恩恵を受けるためで、かつnanochatのvocabパディング
+処理に都合の良い2の冪でもあります。トレードオフとして `value_embeds` と `lm_head` はvocabサイズに
+比例するため、デフォルト比でパラメータ数がおよそ倍になりました — 圧縮率向上の価値はありましたが、
+その分VRAMの余裕は小さくなり、24GBのカードで `--device-batch-size` を32から16に下げる必要があり
+ました。
 
-**SFT dataset: three iterations.**
-1. First attempt used [`kunishou/databricks-dolly-15k-ja`](https://huggingface.co/datasets/kunishou/databricks-dolly-15k-ja)
-   (English Dolly, machine-translated; CC-BY-SA-3.0) with the pretraining batch size inherited
-   unchanged (524,288 tokens) — the entire 14K-row dataset fit in ~5 optimizer steps, effectively
-   no learning happened.
-2. Fixed the batch size (32,768) and ran 4 epochs over the same 14K rows — training loss dropped
-   sharply but validation bpb *rose* (1.04 → 1.26): classic overfitting on a small, repeated,
-   narrow, translated dataset. Cutting back to 1 epoch fixed the overfitting (bpb 1.04 → 0.79) but
-   generation quality was still inconsistent (e.g. answering the capital-of-Japan question
-   incorrectly on one run).
-3. Switched entirely to [`llm-jp/magpie-sft-v1.0`](https://huggingface.co/datasets/llm-jp/magpie-sft-v1.0)
-   (Apache-2.0): ~9x more rows, and *natively generated* Japanese (via the
-   [Magpie](https://arxiv.org/abs/2406.08464) method — question and answer both generated by
-   strong Japanese-capable models) rather than translated. One epoch (958 steps, ~9.5 minutes) took
-   validation bpb from 1.20 to 0.45 and produced consistently correct, on-topic answers with no
-   repetition-loop degeneration. `tasks/japanese_dolly.py` (the now-unused loader from step 1) was
-   removed; `tasks/magpie_ja.py` is the one actually in use.
+**なぜ事前学習にCC-100 jaを使ったのか?** 実は「Japanese SlimPajama」という名前の独立した日本語
+コーパスは存在しません(SlimPajama自体は英語のみのコーパスで、他プロジェクトのデータミックスの中で
+別の日本語コーパスと並ぶ一成分として時々使われるだけです)。代わりに選んだのが
+[`range3/cc100-ja`](https://huggingface.co/datasets/range3/cc100-ja) — [CC-100](https://data.statmt.org/cc-100/)
+の日本語部分をparquetで再shardしたものです。規模が大きく、nanochatのローダーがほぼそのまま受け付
+ける形式であり、日本語LLMプロジェクトでの採用実績もあります。
 
-**Ampere-specific findings.** Flash Attention 3 (via the `kernels-community/flash-attn3` package)
-works on this Ampere (SM 86) card, not just Hopper — worth checking on any card, since falling back
-to SDPA meaningfully hurts throughput with nanochat's sliding-window attention pattern. Observed
-steady-state throughput: ~58K tok/sec, ~74–75% MFU.
+**事前学習を安全に延長する。** `scripts/base_train.py` の `--resume-from-step` は、同じ学習
+スケジュールの*中断された*実行を再開するために設計されています — このときチェックポイントに保存
+された学習率(LR)状態を復元するのは正しい挙動です。しかし、*より大きな* `--target-param-data-ratio`
+を指定してさらに学習を延長する場合は事情が異なります: チェックポイントのLRは旧スケジュールの
+(すでに減衰しきった)値を反映しており、新しいスケジュール用のウォームアップし直した値ではありま
+せん。そのままだと、延長学習の間ずっとほぼゼロの学習率で(気づかないまま)学習してしまうことに
+なります。このForkでは `optimizer.load_state_dict()` の前後で新しく計算したLRをスナップショット・
+復元することでこれを修正しています(モーメンタムバッファ等は通常通りチェックポイントから復元され
+ます)。詳細は `scripts/base_train.py` の差分を参照してください。
 
-## Repository structure
+**SFTデータセット: 3回の試行錯誤。**
+1. 最初は[`kunishou/databricks-dolly-15k-ja`](https://huggingface.co/datasets/kunishou/databricks-dolly-15k-ja)
+   (英語Dollyの機械翻訳、CC-BY-SA-3.0)を、事前学習のバッチサイズ(524,288トークン)をそのまま
+   引き継いで使用 — 14,000行のデータセット全体がわずか約5ステップで消費されてしまい、実質的に
+   ほとんど学習が進みませんでした。
+2. バッチサイズを32,768に修正し、同じ14,000行を4エポック学習 — 訓練lossは大きく下がったものの、
+   validation bpbは*悪化*しました(1.04 → 1.26)。小規模・反復・翻訳データに対する典型的な過学習
+   です。1エポックに減らすことで過学習は解消しました(bpb 1.04 → 0.79)が、生成品質はまだ不安定
+   で(例: ある実行では「日本の首都」の質問に誤答)。
+3. [`llm-jp/magpie-sft-v1.0`](https://huggingface.co/datasets/llm-jp/magpie-sft-v1.0)
+   (Apache-2.0)に完全に切り替え: 件数は約9倍で、翻訳ではなく[Magpie](https://arxiv.org/abs/2406.08464)
+   手法による*ネイティブ生成*の日本語データ(質問・回答とも日本語対応の強力なモデルが生成)です。
+   1エポック(958ステップ、約9.5分)でvalidation bpbは1.20から0.45まで改善し、反復ループでの
+   崩壊もなく、一貫して正確で話題に沿った回答が得られました。ステップ1で使っていた未使用の
+   `tasks/japanese_dolly.py` は削除し、現在は `tasks/magpie_ja.py` を使用しています。
 
-Everything under `nanochat/`, `scripts/` (except the two noted below), `runs/`, and `tests/` is
-upstream, unmodified. This fork's additions:
+**Ampere固有の知見。** Flash Attention 3(`kernels-community/flash-attn3` パッケージ経由)はHopper
+だけでなく、このAmpere(SM 86)のカードでも動作しました — nanochatのsliding window attentionパター
+ンではSDPAへのフォールバックがスループットに大きく影響するため、どのGPUでも一度確認する価値があり
+ます。観測したスループットは定常状態で約58,000 tok/sec、MFU約74〜75%でした。
+
+## リポジトリ構成
+
+`nanochat/`、`scripts/`(下記2ファイルを除く)、`runs/`、`tests/` 以下はすべて本家のコードをその
+まま使用しています。このForkで追加した部分:
 
 ```
 dev/
-├── prepare_cc100_ja.py     # download + reshard range3/cc100-ja into nanochat's shard format
-├── eval_jcommonsenseqa.py  # Japanese commonsense QA benchmark (auto-downloads its data)
-├── gen_test.py             # quick multi-prompt generation smoke test (base model)
-├── gen_test_sft.py         # same, for the chat/SFT model
-├── chat_relay.py           # single-shot CLI chat with persisted conversation state
-└── webapp.py               # minimal local Flask chat UI (binds to 127.0.0.1 only)
+├── prepare_cc100_ja.py     # range3/cc100-jaのダウンロード+nanochatのshard形式への再構成
+├── eval_jcommonsenseqa.py  # 日本語常識推論ベンチマーク(データは自動ダウンロード)
+├── gen_test.py             # 複数プロンプトでの簡易生成テスト(ベースモデル)
+├── gen_test_sft.py         # 同上、チャット/SFTモデル向け
+├── chat_relay.py           # 会話状態を保存しながら1回ずつ実行するCLIチャット
+└── webapp.py               # 最小限のローカルFlaskチャットUI(127.0.0.1のみでリッスン)
 tasks/
-└── magpie_ja.py            # Task wrapper for llm-jp/magpie-sft-v1.0
+└── magpie_ja.py            # llm-jp/magpie-sft-v1.0用のTaskラッパー
 scripts/
-├── base_train.py           # + fix: preserve fresh LR across --resume-from-step when the
-│                            #   training horizon changes (see Design notes)
-└── chat_sft.py             # + swapped the default English SFT mixture (SmolTalk/MMLU/GSM8K)
-                             #   for tasks.magpie_ja.MagpieJa
+├── base_train.py           # 追加: --resume-from-stepで学習量を変更した際にLRを正しく
+│                            #   再ウォームアップする修正(Design notes参照)
+└── chat_sft.py             # 追加: デフォルトの英語SFTミックス(SmolTalk/MMLU/GSM8K)を
+                             #   tasks.magpie_ja.MagpieJa に置き換え
 ```
 
-## Datasets used (not included in this repo)
+## 使用データセット(本リポジトリには含まれません)
 
-No corpora, checkpoints, or generated samples are committed here — everything above downloads its
-own data on first run, cached under `$NANOCHAT_BASE_DIR`. Each dataset keeps its own upstream
-license; check the source before any use beyond personal experimentation.
+コーパス・チェックポイント・生成サンプルはいずれもこのリポジトリにはコミットされていません — 上記
+のスクリプトはすべて初回実行時に自分でデータをダウンロードし、`$NANOCHAT_BASE_DIR` にキャッシュし
+ます。各データセットはそれぞれの元のライセンスに従うため、個人的な実験を超えた利用の前には各リンク
+先を確認してください。
 
-| Dataset | Used for | License |
+| データセット | 用途 | ライセンス |
 |---|---|---|
-| [`range3/cc100-ja`](https://huggingface.co/datasets/range3/cc100-ja) (derived from [CC-100](https://data.statmt.org/cc-100/)) | Pretraining | No additional restriction claimed by the preparer; subject to the [Common Crawl Terms of Use](https://commoncrawl.org/terms-of-use) |
+| [`range3/cc100-ja`](https://huggingface.co/datasets/range3/cc100-ja)([CC-100](https://data.statmt.org/cc-100/)由来) | 事前学習 | 作成者による追加の制限なし。[Common Crawl利用規約](https://commoncrawl.org/terms-of-use)に準拠 |
 | [`llm-jp/magpie-sft-v1.0`](https://huggingface.co/datasets/llm-jp/magpie-sft-v1.0) | SFT | Apache-2.0 |
-| [`leemeng/jcommonsenseqa-v1.1`](https://huggingface.co/datasets/leemeng/jcommonsenseqa-v1.1) (from [JGLUE](https://github.com/yahoo-japan/JGLUE)) | Evaluation only | CC-BY-4.0 |
-| [`kunishou/databricks-dolly-15k-ja`](https://huggingface.co/datasets/kunishou/databricks-dolly-15k-ja) | Early SFT experiment (superseded, see Design notes) | CC-BY-SA-3.0 |
+| [`leemeng/jcommonsenseqa-v1.1`](https://huggingface.co/datasets/leemeng/jcommonsenseqa-v1.1)([JGLUE](https://github.com/yahoo-japan/JGLUE)由来) | 評価のみ | CC-BY-4.0 |
+| [`kunishou/databricks-dolly-15k-ja`](https://huggingface.co/datasets/kunishou/databricks-dolly-15k-ja) | 初期のSFT実験(現在は不使用、Design notes参照) | CC-BY-SA-3.0 |
 
-## Upstream nanochat
+## 本家 nanochat について
 
-The rest of this section is inherited context from upstream and still applies to the underlying
-framework.
+このセクションの残りは本家から引き継いだ内容で、基盤となるフレームワークについては現在もそのまま
+当てはまります。
 
-nanochat is Andrej Karpathy's minimal, single-GPU-node LLM training harness — tokenization,
-pretraining, finetuning, evaluation, and inference in one hackable codebase, built around a single
-complexity dial (`--depth`). See the [original repository](https://github.com/karpathy/nanochat)
-for the full upstream README, the GPT-2-speedrun leaderboard, guides, and discussions.
+nanochatはAndrej Karpathy氏によるミニマルな単一GPUノード向けLLM学習ハーネスです — トークン化、
+事前学習、ファインチューニング、評価、推論をすべて1つのハック可能なコードベースに収め、単一の
+複雑さダイヤル(`--depth`)を中心に構成されています。本家README全文、GPT-2 speedrunリーダーボード、
+ガイド、ディスカッションについては[本家リポジトリ](https://github.com/karpathy/nanochat)を参照
+してください。
 
 ```bibtex
 @misc{nanochat,
@@ -224,5 +223,5 @@ for the full upstream README, the GPT-2-speedrun leaderboard, guides, and discus
 
 ## License
 
-MIT, inherited from upstream — see [`LICENSE`](LICENSE). Training data and dataset licenses are
-separate and listed above; they are not affected by this repository's own license.
+MIT(本家から継承、[`LICENSE`](LICENSE) を参照)。学習データ・データセットのライセンスは上記の
+通りこれとは別であり、本リポジトリ自体のライセンスの影響を受けません。
