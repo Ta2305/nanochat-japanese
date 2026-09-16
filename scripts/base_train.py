@@ -316,8 +316,18 @@ optimizer = model.setup_optimizer(
 )
 
 if resuming:
+    # optimizer.load_state_dict restores param_group lr/initial_lr from the checkpoint, which is
+    # only correct when resuming the *same* schedule. If the training horizon changed (e.g. a
+    # larger --target-param-data-ratio to extend training), the checkpointed values reflect the
+    # old schedule's warmdown, not the fresh peak values just computed above — so save and restore
+    # those around the load (momentum buffers etc. still get restored from the checkpoint).
+    fresh_lrs = [group["lr"] for group in optimizer.param_groups]
+    fresh_initial_lrs = [group["initial_lr"] for group in optimizer.param_groups]
     optimizer.load_state_dict(optimizer_data)
     del optimizer_data
+    for group, fresh_lr, fresh_initial_lr in zip(optimizer.param_groups, fresh_lrs, fresh_initial_lrs):
+        group["lr"] = fresh_lr
+        group["initial_lr"] = fresh_initial_lr
 
 # -----------------------------------------------------------------------------
 # GradScaler for fp16 training (bf16/fp32 don't need it — bf16 has the same exponent range as fp32)

@@ -7,7 +7,19 @@ eval_bundle/
 
 # Secrets
 .env
+.mcp.json
 
 # Local setup
 CLAUDE.md
 wandb/
+.claude/
+.vscode/
+.idea/
+
+# Downloaded corpora, trained checkpoints, tokenizer artifacts, generation
+# samples: these live outside the repo by default (NANOCHAT_BASE_DIR, usually
+# ~/.cache/nanochat), but are ignored here too in case that ever points inside
+.cache/
+checkpoints/
+*.parquet
+*.pkl

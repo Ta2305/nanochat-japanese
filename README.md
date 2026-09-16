@@ -1,219 +1,216 @@
-# nanochat
+# nanochat-ja
 
-![nanochat logo](dev/nanochat.png)
-![scaling laws](dev/scaling_laws_jan26.png)
+A from-scratch **Japanese-native** LLM (tokenizer → pretraining → SFT → chat), built on top of
+[karpathy/nanochat](https://github.com/karpathy/nanochat), trained end-to-end on a **single
+RTX 3090 (24GB)**.
 
-nanochat is the simplest experimental harness for training LLMs. It is designed to run on a single GPU node, the code is minimal/hackable, and it covers all major LLM stages including tokenization, pretraining, finetuning, evaluation, and inference. For example, you can train your own GPT-2 capability LLM (which cost ~$43,000 to train in 2019) for only $48 (~2 hours of 8XH100 GPU node) and then talk to it over a simple CLI. On a spot instance, the total cost can be closer to ~$15. More generally, nanochat is configured out of the box to train an entire miniseries of compute-optimal models by setting one single complexity dial: `--depth`, the number of layers in the GPT transformer model (GPT-2 capability happens to be approximately depth 26). All other hyperparameters (the width of the transformer, number of heads, learning rate adjustments, training horizons, weight decays, ...) are calculated automatically in an optimal way.
+> This is a fork of [karpathy/nanochat](https://github.com/karpathy/nanochat) (MIT License, see
+> [`LICENSE`](LICENSE)). The core training/inference framework (tokenizer, GPT model, optimizer,
+> data loader, engine, SFT loop) is upstream's; this fork adds a Japanese data pipeline, a
+> from-scratch Japanese tokenizer, a Japanese SFT dataset, evaluation on a Japanese benchmark, and
+> a couple of chat front-ends, all described below.
 
-For questions about the repo, I recommend either using [DeepWiki](https://deepwiki.com/karpathy/nanochat) from Devin/Cognition to ask questions about the repo, or use the [Discussions tab](https://github.com/karpathy/nanochat/discussions), or come by the [#nanochat](https://discord.com/channels/1020383067459821711/1427295580895314031) channel on Discord.
+## Results
 
-## Time-to-GPT-2 Leaderboard
+| Stage | Metric | Result |
+|---|---|---|
+| Tokenizer (65,536 vocab, trained on 1B chars of CC-100 ja) | Compression on Japanese text | 7.64 bytes/token, vs. 2.06 (GPT-2) / 2.85 (GPT-4) — **63–73% more efficient** |
+| Base pretraining (depth=12, ~488M params) | Validation bits-per-byte | 0.818 → **0.801** after extending training (12 → 26 tokens/param) |
+| Base model | [JCommonsenseQA](https://github.com/yahoo-japan/JGLUE) (2-shot) | **24.1%** (270/1119) vs. 20.0% random baseline |
+| SFT (`llm-jp/magpie-sft-v1.0`, native Japanese) | Validation bits-per-byte | 1.205 → **0.451** |
 
-Presently, the main focus of development is on tuning the pretraining stage, which takes the most amount of compute. Inspired by the modded-nanogpt repo and to incentivise progress and community collaboration, nanochat maintains a leaderboard for a "GPT-2 speedrun", which is the wall-clock time required to train a nanochat model to GPT-2 grade capability, as measured by the DCLM CORE score. The [runs/speedrun.sh](runs/speedrun.sh) script always reflects the reference way to train GPT-2 grade model and talk to it. The current leaderboard looks as follows:
+Sample conversation after SFT:
 
-| # | time | val_bpb | CORE | Description | Date | Commit | Contributors |
-|---|-------------|---------|------|-------------|------|--------|--------------|
-| 0 | 168 hours | - | 0.2565 | Original OpenAI GPT-2 checkpoint | 2019 | - | OpenAI |
-| 1 | 3.04 | 0.74833 | 0.2585 | d24 baseline, slightly overtrained | Jan 29 2026 | 348fbb3 | @karpathy |
-| 2 | 2.91 | 0.74504 | 0.2578 | d26 slightly undertrained **+fp8** | Feb 2 2026 | a67eba3 | @karpathy |
-| 3 | 2.76 | 0.74645 | 0.2602 | bump total batch size to 1M tokens | Feb 5 2026 | 2c062aa | @karpathy |
-| 4 | 2.02 | 0.71854 | 0.2571 | change dataset to NVIDIA ClimbMix | Mar 4 2026 | 324e69c | @ddudek @karpathy |
-| 5 | 1.80 | 0.71808 | 0.2690 | autoresearch [round 1](https://x.com/karpathy/status/2031135152349524125) | Mar 9 2026 | 6ed7d1d | @karpathy |
-| 6 | 1.65 | 0.71800 | 0.2626 | autoresearch round 2 | Mar 14 2026 | a825e63 | @karpathy |
+```
+User: 日本の首都はどこですか?
+Assistant: 日本の首都は東京です。東京は2010年に天皇陛下が即位したことを契機に「首都令」という
+新たな法律により東京都が定められました。...
 
-The primary metric we care about is "time to GPT-2" - the wall clock time needed to outperform the GPT-2 (1.6B) CORE metric on an 8XH100 GPU node. The GPT-2 CORE score is 0.256525. In 2019, the training of GPT-2 cost approximately $43,000 so it is incredible that due to many advances over 7 years across the stack, we can now do so much faster and for well below $100 (e.g. at the current ~$3/GPU/hr, an 8XH100 node is ~$24/hr, so 2 hours is ~$48).
+User: おすすめの日本食を教えてください。
+Assistant: もちろんです、以下にいくつかのおすすめの日本食を紹介します：
+1. 寿司（すし）: 新鮮な魚介類を使用し、酢飯と新鮮な魚介類で巻いたものです。...
+2. うどん: うどんは小麦粉と水で作った小麦粉の麺で、その独特の食感と軽快な味わいが特徴です。...
+```
 
-See [dev/LEADERBOARD.md](dev/LEADERBOARD.md) for more docs on how to interpret and contribute to the leaderboard.
+(A ~488M parameter model trained for ~17 GPU-hours on one consumer GPU will still hallucinate
+dates and struggle with arithmetic — see [Design notes](#design-notes--what-i-learned) for an
+honest account of what worked and what didn't.)
 
-## Getting started
+## Quickstart
 
-### Setup
-
-nanochat uses [uv](https://docs.astral.sh/uv/) for dependency management. To install:
+No API keys or credentials are required anywhere in this pipeline — every dataset download below
+is a public, anonymous request to Hugging Face.
 
 ```bash
-uv sync --extra gpu    # Use for CUDA (A100/H100/etc.)
-uv sync --extra cpu    # (or) Use for CPU-only / MPS
+uv sync --extra gpu   # or --extra cpu for CPU/MPS (will be very slow)
 source .venv/bin/activate
+export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"  # where data/checkpoints are cached
 ```
 
-For development (adds pytest, matplotlib, ipykernel, transformers, etc.):
+### 1. Pretraining data (Japanese CC-100)
 
 ```bash
-uv sync --extra gpu --group dev
+python -m dev.prepare_cc100_ja --num-source-files 8   # ~16GB download, ~9.6B characters
 ```
 
-### Reproduce and talk to GPT-2
+Downloads shards from [`range3/cc100-ja`](https://huggingface.co/datasets/range3/cc100-ja) and
+repackages them into the parquet shard format `nanochat/dataset.py` expects.
 
-The most fun you can have is to train your own GPT-2 and talk to it. The entire pipeline to do so is contained in the single file [runs/speedrun.sh](runs/speedrun.sh), which is designed to be run on an 8XH100 GPU node. Boot up a new 8XH100 GPU box from your favorite provider (e.g. I use and like [Lambda](https://lambda.ai/service/gpu-cloud)), and kick off the training script:
+### 2. Tokenizer
 
 ```bash
-bash runs/speedrun.sh
+python -m scripts.tok_train --vocab-size 65536 --max-chars 1000000000
+python -m scripts.tok_eval
 ```
 
-You may wish to do so in a screen session as this will take ~1.5 hours to run. Once it's done, you can talk to your model over the CLI. Make sure again that your local uv virtual environment is active (run `source .venv/bin/activate`), and chat:
+Trained from scratch on the Japanese corpus only. 1B characters was chosen after a 3B-character
+run OOM'd during BPE pair-counting (see [Design notes](#design-notes--what-i-learned)).
+
+### 3. Base pretraining
 
 ```bash
-python -m scripts.chat_cli
+python -m scripts.base_train --depth=12 --device-batch-size=16
 ```
 
-Get it to write stories or poems. Ask it to tell you who you are to see a hallucination. Ask it why the sky is blue. Or why it's green. The speedrun is a 4e19 FLOPs capability model so it's a bit like talking to a kindergartener :). An example conversation with a speedrun model:
-
-> **User:** Hello whats up?
->
-> **Assistant:** Hello! How can I help you today?
->
-> **User:** Why is the sky blue?
->
-> **Assistant:** The sky is blue due to an optical illusion called the Rayleigh Scattering of Light, which occurs when sunlight passes through tiny particles in the air. These particles are made up of tiny blue and violet particles that cause the light to bend in a particular way.
->
-> **User:** That's cool. Write a poem about it.
->
-> **Assistant:** In the twilight's glow, the sky is blue,<br>
-> A canvas of shimmering blue, where skies unfold,<br>
-> A world of blue, where blue and more blue,<br>
-> Are woven together in a tapestry so fine,<br>
-> Where every hue seems to sing a story.<br>
-> ...
-
-A few more notes:
-
-- The code will run just fine on the Ampere 8XA100 GPU node as well, but a bit slower.
-- All code will run just fine on even a single GPU by omitting `torchrun`, and will produce ~identical results (code will automatically switch to gradient accumulation), but you'll have to wait 8 times longer.
-- If your GPU(s) have less than 80GB, you'll have to tune some of the hyperparameters or you will OOM / run out of VRAM. Look for `--device-batch-size` in the scripts and reduce it until things fit. E.g. from 32 (default) to 16, 8, 4, 2, or even 1. Less than that you'll have to know a bit more what you're doing and get more creative.
-- Most of the code is fairly vanilla PyTorch so it should run on anything that supports that - xpu, mps, or etc, but I haven't personally exercised all of these code paths so there might be sharp edges.
-
-## Research
-
-If you are a researcher and wish to help improve nanochat, two scripts of interest are [runs/scaling_laws.sh](runs/scaling_laws.sh) and [runs/miniseries.sh](runs/miniseries.sh). See [Jan 7 miniseries v1](https://github.com/karpathy/nanochat/discussions/420) for related documentation. For quick experimentation (~5 min pretraining runs) my favorite scale is to train a 12-layer model (GPT-1 sized), e.g. like this:
-
-```
-OMP_NUM_THREADS=1 torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
-    --depth=12 \
-    --run="d12" \
-    --model-tag="d12" \
-    --core-metric-every=999999 \
-    --sample-every=-1 \
-    --save-every=-1 \
-```
-
-This uses wandb (run name "d12"), only runs the CORE metric on last step, and it doesn't sample and save intermediate checkpoints. I like to change something in the code, re-run a d12 (or a d16 etc) and see if it helped, in an iteration loop. To see if a run helps, I like to monitor the wandb plots for:
-
-1. `val_bpb` (validation loss in vocab-size-invariant units of bits per byte) as a function of `step`, `total_training_time` and `total_training_flops`.
-2. `core_metric` (the DCLM CORE score)
-3. VRAM utilization, `train/mfu` (Model FLOPS utilization), `train/tok_per_sec` (training throughput)
-
-See an example [here](https://github.com/karpathy/nanochat/pull/498#issuecomment-3850720044).
-
-The important thing to note is that nanochat is written and configured around one single dial of complexity - the depth of the transformer. This single integer automatically determines all other hyperparameters (the width of the transformer, number of heads, learning rate adjustments, training horizons, weight decays, ...) so that the trained model comes out compute optimal. The idea is that the user doesn't have to think about or set any of this, they are simply asking for a smaller or bigger model using `--depth`, and everything "just works". By sweeping out the depth, you achieve the nanochat miniseries of compute optimal models at various sizes. GPT-2 capability model (which is of most interest at the moment) happens to be somewhere around d24-d26 range with the current code. But any candidate changes to the repo have to be principled enough that they work for all settings of depth.
-
-## Running on CPU / MPS
-
-The script [runs/runcpu.sh](runs/runcpu.sh) shows a very simple example of running on CPU or Apple Silicon. It dramatically shrinks the LLM that is being trained to make things fit into a reasonable time interval of a few ten minutes of training. You will not get strong results in this way.
-
-## Precision / dtype
-
-nanochat does not use `torch.amp.autocast`. Instead, precision is managed explicitly through a single global `COMPUTE_DTYPE` (defined in `nanochat/common.py`). By default this is auto-detected based on your hardware:
-
-| Hardware | Default dtype | Why |
-|----------|--------------|-----|
-| CUDA SM 80+ (A100, H100, ...) | `bfloat16` | Native bf16 tensor cores |
-| CUDA SM < 80 (V100, T4, ...) | `float32` | No bf16; fp16 available via `NANOCHAT_DTYPE=float16` (uses GradScaler) |
-| CPU / MPS | `float32` | Safe default. On recent macOS, MPS also runs `NANOCHAT_DTYPE=bfloat16` fine (~25% less memory, similar speed) |
-
-You can override the default with the `NANOCHAT_DTYPE` environment variable:
+`--depth=12` picks a ~488M parameter model sized for a 24GB card; nanochat derives every other
+hyperparameter (width, batch size, LR, weight decay, training horizon) from it. `--device-batch-size`
+may need to go lower on smaller GPUs — see upstream's README for the OOM-tuning guidance this fork
+inherited. To extend training with more of the downloaded corpus later:
 
 ```bash
-NANOCHAT_DTYPE=float32 python -m scripts.chat_cli -p "hello"   # force fp32
-NANOCHAT_DTYPE=bfloat16 torchrun --nproc_per_node=8 -m scripts.base_train  # force bf16
+python -m scripts.base_train --depth=12 --device-batch-size=16 \
+  --resume-from-step=<last step> --target-param-data-ratio=26
 ```
 
-How it works: model weights are stored in fp32 (for optimizer precision), but our custom `Linear` layer casts them to `COMPUTE_DTYPE` during the forward pass. Embeddings are stored directly in `COMPUTE_DTYPE` to save memory. This gives us the same mixed-precision benefit as autocast but with full explicit control over what runs in which precision.
+### 4. Supervised fine-tuning (chat)
 
-Note: `float16` training automatically enables a `GradScaler` in `base_train.py` to prevent gradient underflow. SFT supports this too but RL currently does not. Inference in fp16 works fine everywhere.
-
-## Guides
-
-I've published a number of guides that might contain helpful information, most recent to least recent:
-
-- [Feb 1 2026: Beating GPT-2 for <<$100: the nanochat journey](https://github.com/karpathy/nanochat/discussions/481)
-- [Jan 7 miniseries v1](https://github.com/karpathy/nanochat/discussions/420) documents the first nanochat miniseries of models.
-- To add new abilities to nanochat, see [Guide: counting r in strawberry (and how to add abilities generally)](https://github.com/karpathy/nanochat/discussions/164).
-- [Oct 13 2025: original nanochat post](https://github.com/karpathy/nanochat/discussions/1) introducing nanochat, though now it contains some deprecated information and the model is a lot older (with worse results) than current master.
-
-## File structure
-
-```
-.
-├── LICENSE
-├── README.md
-├── dev
-│   ├── nanochat.png
-│   └── repackage_data_reference.py # Pretraining data shard generation
-├── nanochat
-│   ├── __init__.py                 # empty
-│   ├── checkpoint_manager.py       # Save/Load model checkpoints
-│   ├── common.py                   # Misc small utilities, quality of life
-│   ├── core_eval.py                # Evaluates base model CORE score (DCLM paper)
-│   ├── dataloader.py               # Tokenizing Distributed Data Loader
-│   ├── dataset.py                  # Download/read utils for pretraining data
-│   ├── engine.py                   # Efficient model inference with KV Cache
-│   ├── execution.py                # Allows the LLM to execute Python code as tool
-│   ├── gpt.py                      # The GPT nn.Module Transformer
-│   ├── loss_eval.py                # Evaluate bits per byte (instead of loss)
-│   ├── optim.py                    # AdamW + Muon optimizer, 1GPU and distributed
-│   └── tokenizer.py                # BPE Tokenizer wrapper in style of GPT-4
-├── pyproject.toml
-├── runs
-│   ├── miniseries.sh               # Miniseries training script
-│   ├── runcpu.sh                   # Small example of how to run on CPU/MPS
-│   ├── scaling_laws.sh             # Scaling laws experiments
-│   └── speedrun.sh                 # Train the ~$100 nanochat d20
-├── scripts
-│   ├── base_eval.py                # Base model: CORE score, bits per byte, samples
-│   ├── base_train.py               # Base model: train
-│   ├── chat_cli.py                 # Chat model: talk to over CLI
-│   ├── chat_eval.py                # Chat model: eval tasks
-│   ├── chat_rl.py                  # Chat model: reinforcement learning
-│   ├── chat_sft.py                 # Chat model: train SFT
-│   ├── infer_bench.py              # Inference: latency/throughput/VRAM bench
-│   ├── tok_eval.py                 # Tokenizer: evaluate compression rate
-│   └── tok_train.py                # Tokenizer: train it
-├── tasks
-│   ├── arc.py                      # Multiple choice science questions
-│   ├── common.py                   # TaskMixture | TaskSequence
-│   ├── gsm8k.py                    # 8K Grade School Math questions
-│   ├── humaneval.py                # Misnomer; Simple Python coding task
-│   ├── mmlu.py                     # Multiple choice questions, broad topics
-│   └── smoltalk.py                 # Conglomerate dataset of SmolTalk from HF
-├── tests
-│   ├── test_attention_fallback.py  # FA3/SDPA attention fallback
-│   ├── test_engine.py              # Inference engine, KV cache
-│   ├── test_execution.py           # Sandboxed code execution
-│   ├── test_optim.py               # MuonAdamW optimizer (needs GPU)
-│   ├── test_tasks.py               # Task slicing, mixtures, HubDataset
-│   └── test_tokenizer.py           # BPE round-trips, chat rendering
-└── uv.lock
+```bash
+python -m scripts.chat_sft --total-batch-size=32768 --magpie-epochs=1
 ```
 
-## Contributing
+Uses [`llm-jp/magpie-sft-v1.0`](https://huggingface.co/datasets/llm-jp/magpie-sft-v1.0), a native
+(not translated) Japanese instruction dataset. `--total-batch-size` is set explicitly because the
+pretraining default (524,288 tokens) is sized for billions of pretraining tokens, not a ~130K-row
+SFT set — see [Design notes](#design-notes--what-i-learned).
 
-The goal of nanochat is to improve the state of the art in micro models that are accessible to work with end to end on budgets of < $1000 dollars. Accessibility is about overall cost but also about cognitive complexity - nanochat is not an exhaustively configurable LLM "framework"; there are no giant configuration objects, model factories, or if-then-else monsters in the code base. It is a single, cohesive, minimal, readable, hackable, maximally-forkable "strong baseline" codebase designed to run start to end and produce a ChatGPT model you can talk to. Currently, the most interesting part personally is speeding up the latency to GPT-2 (i.e. getting a CORE score above 0.256525). Currently this takes ~1.5 hours (down from 3h), but by improving the pretraining stage we can improve this further.
+### 5. Talk to it
 
-Current AI policy: disclosure. When submitting a PR, please declare any parts that had substantial LLM contribution and that you have not written or that you do not fully understand.
+```bash
+python -m scripts.chat_cli                 # interactive CLI (upstream)
+python -m dev.chat_relay "こんにちは"        # single-shot, persists conversation state to disk
+python -m dev.webapp                        # local web UI at http://127.0.0.1:8000
+```
 
-## Acknowledgements
+### Evaluation
 
-- The name (nanochat) derives from my earlier project [nanoGPT](https://github.com/karpathy/nanoGPT), which only covered pretraining.
-- nanochat is also inspired by [modded-nanoGPT](https://github.com/KellerJordan/modded-nanogpt), which gamified the nanoGPT repo with clear metrics and a leaderboard, and borrows a lot of its ideas and some implementation for pretraining.
-- Thank you to [HuggingFace](https://huggingface.co/) for fineweb and smoltalk.
-- Thank you [Lambda](https://lambda.ai/service/gpu-cloud) for the compute used in developing this project.
-- Thank you to chief LLM whisperer 🧙‍♂️ Alec Radford for advice/guidance.
-- Thank you to the repo czar Sofie [@svlandeg](https://github.com/svlandeg) for help with managing issues, pull requests and discussions of nanochat.
+```bash
+python -m dev.eval_jcommonsenseqa           # JCommonsenseQA (Japanese commonsense QA), auto-downloads
+python -m scripts.base_eval                 # upstream's CORE metric (English benchmarks; not very
+                                             # informative for a Japanese-only model, included for completeness)
+```
 
-## Cite
+## Design notes / what I learned
 
-If you find nanochat helpful in your research cite simply as:
+**Why depth=12, not d20/d26 (upstream's GPT-2-grade target)?** Upstream's speedrun targets an
+8×H100 node. On one RTX 3090, a compute budget calculation (peak BF16 FLOPs of the 3090 × available
+time, divided by FLOPs/token at various depths) put the compute-optimal size around depth 9–12 for
+a several-hour run — depth=12 was chosen because it's also nanochat's own internal reference depth
+(the muP-style scaling formulas are calibrated against d12), keeping the run inside a well-tested
+hyperparameter regime.
+
+**Why train the tokenizer from scratch instead of reusing GPT-2/GPT-4's?** Those are optimized for
+English; a from-scratch BPE tokenizer on the Japanese corpus alone compresses Japanese text far
+better (see the Results table). Vocab size 65,536 (vs. upstream's default 32,768) was chosen
+because Japanese's much larger character inventory benefits from a bigger vocabulary, and it's
+still a clean power of two for nanochat's vocab-padding logic. The tradeoff: `value_embeds` and
+`lm_head` scale with vocab size, so this roughly doubled their parameter count relative to the
+default — worth it for the compression gain, but the resulting VRAM headroom is tighter as a
+result (`--device-batch-size` had to drop from 32 to 16 on a 24GB card).
+
+**Why CC-100 ja for pretraining?** There is no dataset actually named "Japanese SlimPajama" — that
+name doesn't correspond to a real, independent Japanese corpus (SlimPajama itself is English-only,
+occasionally used as one *ingredient* alongside separate Japanese corpora in other projects' data
+mixes). [`range3/cc100-ja`](https://huggingface.co/datasets/range3/cc100-ja) — a parquet re-shard
+of the Japanese portion of [CC-100](https://data.statmt.org/cc-100/) — was chosen instead: it's
+large, in a format nanochat's loader accepts almost unmodified, and has real precedent in Japanese
+LLM projects.
+
+**Extending pretraining safely.** `scripts/base_train.py --resume-from-step` is designed for
+resuming an *interrupted* run of the same schedule — its checkpoint carries the optimizer's
+learning-rate state, which is correct to restore in that case. Resuming with a *larger*
+`--target-param-data-ratio` to train further is a different situation: the checkpointed LR reflects
+the old (already-decayed) schedule, not a fresh warm restart for the new one. Left as-is, extending
+training this way would silently train at a near-zero learning rate for the entire extension. This
+fork fixes it by snapshotting the freshly-computed LR before `optimizer.load_state_dict()` and
+restoring it after (momentum buffers still load normally) — see the diff in `scripts/base_train.py`.
+
+**SFT dataset: three iterations.**
+1. First attempt used [`kunishou/databricks-dolly-15k-ja`](https://huggingface.co/datasets/kunishou/databricks-dolly-15k-ja)
+   (English Dolly, machine-translated; CC-BY-SA-3.0) with the pretraining batch size inherited
+   unchanged (524,288 tokens) — the entire 14K-row dataset fit in ~5 optimizer steps, effectively
+   no learning happened.
+2. Fixed the batch size (32,768) and ran 4 epochs over the same 14K rows — training loss dropped
+   sharply but validation bpb *rose* (1.04 → 1.26): classic overfitting on a small, repeated,
+   narrow, translated dataset. Cutting back to 1 epoch fixed the overfitting (bpb 1.04 → 0.79) but
+   generation quality was still inconsistent (e.g. answering the capital-of-Japan question
+   incorrectly on one run).
+3. Switched entirely to [`llm-jp/magpie-sft-v1.0`](https://huggingface.co/datasets/llm-jp/magpie-sft-v1.0)
+   (Apache-2.0): ~9x more rows, and *natively generated* Japanese (via the
+   [Magpie](https://arxiv.org/abs/2406.08464) method — question and answer both generated by
+   strong Japanese-capable models) rather than translated. One epoch (958 steps, ~9.5 minutes) took
+   validation bpb from 1.20 to 0.45 and produced consistently correct, on-topic answers with no
+   repetition-loop degeneration. `tasks/japanese_dolly.py` (the now-unused loader from step 1) was
+   removed; `tasks/magpie_ja.py` is the one actually in use.
+
+**Ampere-specific findings.** Flash Attention 3 (via the `kernels-community/flash-attn3` package)
+works on this Ampere (SM 86) card, not just Hopper — worth checking on any card, since falling back
+to SDPA meaningfully hurts throughput with nanochat's sliding-window attention pattern. Observed
+steady-state throughput: ~58K tok/sec, ~74–75% MFU.
+
+## Repository structure
+
+Everything under `nanochat/`, `scripts/` (except the two noted below), `runs/`, and `tests/` is
+upstream, unmodified. This fork's additions:
+
+```
+dev/
+├── prepare_cc100_ja.py     # download + reshard range3/cc100-ja into nanochat's shard format
+├── eval_jcommonsenseqa.py  # Japanese commonsense QA benchmark (auto-downloads its data)
+├── gen_test.py             # quick multi-prompt generation smoke test (base model)
+├── gen_test_sft.py         # same, for the chat/SFT model
+├── chat_relay.py           # single-shot CLI chat with persisted conversation state
+└── webapp.py               # minimal local Flask chat UI (binds to 127.0.0.1 only)
+tasks/
+└── magpie_ja.py            # Task wrapper for llm-jp/magpie-sft-v1.0
+scripts/
+├── base_train.py           # + fix: preserve fresh LR across --resume-from-step when the
+│                            #   training horizon changes (see Design notes)
+└── chat_sft.py             # + swapped the default English SFT mixture (SmolTalk/MMLU/GSM8K)
+                             #   for tasks.magpie_ja.MagpieJa
+```
+
+## Datasets used (not included in this repo)
+
+No corpora, checkpoints, or generated samples are committed here — everything above downloads its
+own data on first run, cached under `$NANOCHAT_BASE_DIR`. Each dataset keeps its own upstream
+license; check the source before any use beyond personal experimentation.
+
+| Dataset | Used for | License |
+|---|---|---|
+| [`range3/cc100-ja`](https://huggingface.co/datasets/range3/cc100-ja) (derived from [CC-100](https://data.statmt.org/cc-100/)) | Pretraining | No additional restriction claimed by the preparer; subject to the [Common Crawl Terms of Use](https://commoncrawl.org/terms-of-use) |
+| [`llm-jp/magpie-sft-v1.0`](https://huggingface.co/datasets/llm-jp/magpie-sft-v1.0) | SFT | Apache-2.0 |
+| [`leemeng/jcommonsenseqa-v1.1`](https://huggingface.co/datasets/leemeng/jcommonsenseqa-v1.1) (from [JGLUE](https://github.com/yahoo-japan/JGLUE)) | Evaluation only | CC-BY-4.0 |
+| [`kunishou/databricks-dolly-15k-ja`](https://huggingface.co/datasets/kunishou/databricks-dolly-15k-ja) | Early SFT experiment (superseded, see Design notes) | CC-BY-SA-3.0 |
+
+## Upstream nanochat
+
+The rest of this section is inherited context from upstream and still applies to the underlying
+framework.
+
+nanochat is Andrej Karpathy's minimal, single-GPU-node LLM training harness — tokenization,
+pretraining, finetuning, evaluation, and inference in one hackable codebase, built around a single
+complexity dial (`--depth`). See the [original repository](https://github.com/karpathy/nanochat)
+for the full upstream README, the GPT-2-speedrun leaderboard, guides, and discussions.
 
 ```bibtex
 @misc{nanochat,
@@ -227,4 +224,5 @@ If you find nanochat helpful in your research cite simply as:
 
 ## License
 
-MIT
+MIT, inherited from upstream — see [`LICENSE`](LICENSE). Training data and dataset licenses are
+separate and listed above; they are not affected by this repository's own license.
